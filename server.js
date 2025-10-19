@@ -900,3 +900,153 @@ process.on('SIGINT', async () => {
   }
   process.exit(0);
 });
+
+// Add background music 
+app.post('/add-music-for-opus-clips', async (req, res) => {
+  try {
+    const { googleDriveFileIDForMusic, videoUrl } = req.body;
+    
+    const outputPath = path.join('temp', `final_${uuidv4()}.mp4`);
+    let downloadedMusicPath = null;
+    let downloadedVideoPath = null;
+    
+    finalVideoPath = outputPath;
+    
+    // Handle music file - download if URL, use local path if file path
+    let actualMusicPath = null;
+    if (googleDriveFileIDForMusic) {
+        // Download music from URL
+        console.log('Downloading music from google drive ID:', googleDriveFileIDForMusic);
+        downloadedMusicPath = path.join('temp', `music_${uuidv4()}.mp3`);
+        try {
+          //await downloadFile(downloadedMusicPath, googleDriveFileIDForMusic);
+          await downloadMusicFile(`https://drive.google.com/uc?export=download&id=${googleDriveFileIDForMusic}`, downloadedMusicPath);
+          actualMusicPath = downloadedMusicPath;
+          console.log('Music downloaded to:', actualMusicPath);
+        } catch (downloadError) {
+          console.warn('Failed to download music:', downloadError.message);
+          // Continue without music if download fails
+        }
+       
+    }
+
+    if (videoUrl) {
+        // Download music from URL
+        console.log('Downloading video for opus clips from google drive:', videoUrl);
+        downloadedVideoPath = path.join('temp', `video_${uuidv4()}.mp4`);
+        try {
+          //await downloadFile(downloadedMusicPath, googleDriveFileIDForMusic);
+          await downloadMusicFile(videoUrl, downloadedVideoPath);
+          console.log('Music downloaded to:', actualMusicPath);
+        } catch (downloadError) {
+          console.warn('Failed to download music:', downloadError.message);
+          // Continue without music if download fails
+        }
+       
+    }
+    
+    console.log('Input video:', downloadedVideoPath);
+    console.log('Output path:', outputPath);
+    
+    await new Promise((resolve, reject) => {
+      const command = ffmpeg(downloadedVideoPath);
+      
+      // Add background music if available
+      if (actualMusicPath && fsSync.existsSync(actualMusicPath)) {
+        console.log('Adding background music:', actualMusicPath);
+        command.input(actualMusicPath);
+      }
+      
+      // Configure audio and video filters
+      const audioFilters = [];
+//      const videoFilters = [`subtitles='${escapedSubtitlePath}':force_style='FontName=Arial,FontSize=12,PrimaryColour=&Hffffff&,BackColour=&H80000000&,Bold=1,Outline=2,OutlineColour=&H000000&,MarginV=40,MarginL=75,MarginR=75,Alignment=2'`];
+      
+      if (actualMusicPath && fsSync.existsSync(actualMusicPath)) {
+        // Mix original audio with background music
+        // Lower original audio volume and add background music at moderate volume
+        audioFilters.push('[0:a]volume=0.8[a0];[1:a]volume=0.2[a1];[a0][a1]amix=inputs=2:duration=first:dropout_transition=0[aout]');
+        command.outputOptions([
+          '-map', '0:v',  // Use video from first input (original video)
+          '-map', '[aout]' // Use mixed audio output
+        ]);
+      }
+      
+      // Apply filters
+      if (audioFilters.length > 0) {
+        command.complexFilter(audioFilters.join(';'));
+      }
+//      command.outputOptions([
+//        '-vf', videoFilters.join(',')
+//      ]);
+      
+      command
+        .output(outputPath)
+        .videoCodec('libx264')
+        .audioCodec('aac')
+        .outputOptions([
+          '-preset veryfast',
+          '-crf 18',
+          '-threads 1',
+          '-avoid_negative_ts make_zero',
+          '-movflags', '+faststart',
+          '-y' // Overwrite output file if exists
+        ])
+        .on('start', (commandLine) => {
+          console.log('FFmpeg command:', commandLine);
+        })
+        .on('progress', (progress) => {
+          if (progress.percent) {
+            console.log('Final processing progress:', Math.round(progress.percent) + '%');
+          }
+        })
+        .on('stderr', (stderrLine) => {
+          console.log('FFmpeg stderr:', stderrLine);
+        })
+        .on('end', () => {
+          console.log('Final video processing completed');
+          if (downloadedMusicPath) {
+            fsSync.unlink(downloadedMusicPath, (err) => {
+              if (err) console.warn('Failed to delete temp music file:', err);
+            });
+          }
+          resolve();
+        })
+        .on('error', (error) => {
+          console.error('FFmpeg error in final processing:', error);
+          console.error('FFmpeg stderr:', error.stderr);
+          if (downloadedMusicPath) {
+            fsSync.unlink(downloadedMusicPath, () => {});
+          }
+          reject(error);
+        })
+        .run();
+    });
+    
+    // Verify output file was created
+    if (!fsSync.existsSync(outputPath)) {
+      throw new Error('Output video file was not created');
+    }
+    
+    const stats = await fs.stat(outputPath);
+    
+    res.json({
+      success: true,
+      message: 'Music added successfully',
+      outputPath: outputPath,
+      videoId: `final_${uuidv4()}.mp4`,
+      finalStats: {
+        fileSize: stats.size,
+        hasMusic: !!(actualMusicPath && fsSync.existsSync(actualMusicPath)), // Check if music was actually added
+        hasSubtitles: true
+      }
+    });
+    
+  } catch (error) {
+    console.error('Error adding music:', error);
+    res.status(500).json({ 
+      error: 'Failed to add music', 
+      details: error.message,
+      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+    });
+  }
+});
